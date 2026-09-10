@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "grimwatch"
+version = "1.0.0"
+description = "A CLI to manage your markdown movie list — with AI classification and recommendations."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["movies", "cli", "film", "watchlist", "ai", "grimwatch"]
+authors = [{ name = "Nirmal" }]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Environment :: Console",
+]
+
+dependencies = [
+    "typer>=0.12",
+    "rich>=13",
+    "groq>=0.9",
+]
+
+[project.optional-dependencies]
+metadata = []
+
+[project.urls]
+"Homepage" = "https://github.com/Nirmal2OO8/grimwatch"
+"Changelog" = "https://github.com/Nirmal2OO8/grimwatch/blob/main/CHANGELOG.md"
+
+[project.scripts]
+grimwatch = "grimwatch.cli:app"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["grimwatch*"]

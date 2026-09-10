@@ -1,0 +1,35 @@
+# Python
+__pycache__/
+*.py[cod]
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+*.egg
+
+# Test and coverage output
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# reelq
+# Don't commit your personal list or API key
+*.reelq/
+*.grimwatch/
+config.json
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
