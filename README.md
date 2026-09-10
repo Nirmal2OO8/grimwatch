@@ -2,6 +2,8 @@
 
 > *Your markdown movie archive, with a brain.*
 
+[![PyPI](https://img.shields.io/pypi/v/grimwatch)](https://pypi.org/project/grimwatch/)
+
 A terminal CLI for the films you mean to watch and the ones you'll never forget.
 Grimwatch keeps your list in plain markdown — no database, no account, no cloud.
 AI handles classification and recommendations. You handle the watching.
@@ -14,6 +16,8 @@ AI handles classification and recommendations. You handle the watching.
 
 ```bash
 pip install grimwatch
+# or, recommended for CLI tools:
+pipx install grimwatch
 ```
 
 Requires Python 3.10+. Works on Windows, macOS, Linux.
