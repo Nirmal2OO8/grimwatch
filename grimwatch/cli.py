@@ -7,7 +7,7 @@ from typing import Optional
 from rich.table import Table
 from rich.prompt import Confirm, Prompt
 from rich import box
-from . import __version__
+from grimwatch import __version__
 from .ui import console, brand_banner, stat_cards, stat_card, unquote
 
 app = typer.Typer(
