@@ -6,6 +6,8 @@ A terminal CLI for the films you mean to watch and the ones you'll never forget.
 Grimwatch keeps your list in plain markdown — no database, no account, no cloud.
 AI handles classification and recommendations. You handle the watching.
 
+![grimwatch main screen](screenshots/first_screen.png)
+
 ---
 
 ## Install
@@ -49,6 +51,28 @@ grimwatch tonight                  # one pick, right now
 | 12 | `dedup` | Remove duplicates |
 | 13 | `setup` | Change list path or Groq key |
 | 14 | `about` | Who made this and why |
+| 15 | `export` | Export a Markdown backup; restore it with import |
+| 16 | `info` | Show metadata and your notes for a film |
+
+---
+
+## Screenshots
+
+**Adding a film — AI classifies it instantly**
+
+![add command](screenshots/option1.png)
+
+**AI suggestions by mood**
+
+![suggest command](screenshots/option4.png)
+
+**Film info with metadata**
+
+![info command](screenshots/option16.png)
+
+**About**
+
+![about screen](screenshots/about.png)
 
 ---
 
