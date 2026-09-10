@@ -5,7 +5,7 @@
 [![PyPI](https://img.shields.io/pypi/v/grimwatch)](https://pypi.org/project/grimwatch/)
 
 A terminal CLI for the films you mean to watch and the ones you'll never forget.
-Grimwatch keeps your list in plain markdown — no database, no account, no cloud.
+Grimwatch keeps your list in plain markdown, no database, no account, no cloud.
 AI handles classification and recommendations. You handle the watching.
 
 ![grimwatch main screen](screenshots/first_screen.png)
@@ -20,7 +20,7 @@ pip install grimwatch
 pipx install grimwatch
 ```
 
-Requires Python 3.10+. Works on Windows, macOS, Linux.
+Requires Python 3.10+. Works on Linux, macOS, Windows.
 
 ---
 
