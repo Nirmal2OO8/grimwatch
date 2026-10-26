@@ -6,6 +6,7 @@ import urllib.request
 from pathlib import Path
 from rich.panel import Panel
 from rich.prompt import Prompt, Confirm
+from .backends import AIBackend, GroqBackend, OpenAICompatibleBackend, LocalModelUnreachableError
 from .ui import console, unquote
 
 _CONFIG_OVERRIDE = os.environ.get("GRIMWATCH_CONFIG_DIR")
@@ -161,32 +162,89 @@ def run_setup(existing: dict = None):
 
     console.print()
 
-    # ── Groq API key ───────────────────────────────────────────────────────────
-    current_key = cfg.get("groq_api_key", "")
-    console.print("[bold]Step 2 of 4[/] — Groq API key")
+    # ── AI backend choice ──────────────────────────────────────────────────────
+    console.print("[bold]Step 2 of 5[/] — AI Backend")
     console.print(
-        "[dim]Free at [link=https://console.groq.com]console.groq.com[/link][/]\n"
-        "[dim]Used for AI classification and suggestions.[/]\n"
+        "[dim]AI is optional. Classification and suggestions need one.[/]\n"
+        "[dim]Known local runtimes: Ollama (localhost:11434/v1), LM Studio (localhost:1234/v1)[/]\n"
     )
-    if current_key:
-        masked = current_key[:8] + "..." + current_key[-4:]
-        console.print(f"[dim]Current: {masked}[/]")
+    console.print("  [dim]1. Groq (cloud, free tier)  2. Local (Ollama/LM Studio)  3. None[/]\n")
+    backend_choice = Prompt.ask(
+        "  Backend",
+        choices=["1", "2", "3"],
+        default="1",
+        console=console,
+    )
 
-    while True:
-        key = Prompt.ask("  Groq API key", default=current_key or "", password=True, console=console).strip()
-        if not key:
-            skip = Confirm.ask("  Skip AI features for now?", default=False, console=console)
-            if skip:
+    cfg["ai_backend"] = "none"
+
+    if backend_choice == "1":
+        # ── Groq key ───────────────────────────────────────────────────────────
+        current_key = cfg.get("groq_api_key", "")
+        console.print("[bold]Step 2a of 5[/] — Groq API key")
+        console.print("[dim]Free at https://console.groq.com[/]\n")
+        if current_key:
+            console.print(f"[dim]Current: {current_key[:8]}...{current_key[-4:]}[/]")
+        while True:
+            key = Prompt.ask("  Key", default=current_key or "", password=True, console=console).strip()
+            if not key:
+                skip = Confirm.ask("  Skip AI features?", default=False, console=console)
+                if skip:
+                    break
+            else:
+                cfg["groq_api_key"] = key
+                cfg["ai_backend"] = "groq"
+                console.print("  [green]✓[/] Groq key saved.")
                 break
-        else:
-            cfg["groq_api_key"] = key
-            console.print("  [green]✓[/] Key saved.")
-            break
+
+    elif backend_choice == "2":
+        # ── Local model ────────────────────────────────────────────────────────
+        console.print("[bold]Step 2a of 5[/] — Local model endpoint")
+        current_local = cfg.get("local_ai", {})
+        base_url = Prompt.ask(
+            "  Base URL",
+            default=current_local.get("base_url", "http://localhost:11434/v1"),
+            console=console,
+        ).strip()
+        model_name = Prompt.ask(
+            "  Model name",
+            default=current_local.get("model", "llama3"),
+            console=console,
+        ).strip()
+        local_key = Prompt.ask(
+            "  API key [dim](leave blank if none)[/]",
+            default=current_local.get("api_key", ""),
+            password=True,
+            console=console,
+        ).strip()
+
+        console.print("  [dim]Testing connection…[/]")
+        _local_backend = OpenAICompatibleBackend(base_url=base_url, api_key=local_key)
+        try:
+            latency = _local_backend.test_connection(model_name)
+            console.print(f"  [green]✓[/] Connected in {latency * 1000:.0f} ms.")
+            cfg["local_ai"] = {"base_url": base_url, "model": model_name, "api_key": local_key}
+            cfg["ai_backend"] = "local"
+            cfg["groq_model"] = model_name
+        except LocalModelUnreachableError as exc:
+            console.print(f"  [red]✗ Unreachable:[/] {exc}")
+            override = Confirm.ask("  Save anyway?", default=False, console=console)
+            if override:
+                cfg["local_ai"] = {"base_url": base_url, "model": model_name, "api_key": local_key}
+                cfg["ai_backend"] = "local"
+                cfg["groq_model"] = model_name
+        except Exception as exc:
+            console.print(f"  [red]✗ Error:[/] {exc}")
+            override = Confirm.ask("  Save anyway?", default=False, console=console)
+            if override:
+                cfg["local_ai"] = {"base_url": base_url, "model": model_name, "api_key": local_key}
+                cfg["ai_backend"] = "local"
+                cfg["groq_model"] = model_name
 
     console.print()
 
     # ── Optional metadata fallbacks ───────────────────────────────────────────
-    console.print("[bold]Step 3 of 4[/] — Optional metadata fallback keys")
+    console.print("[bold]Step 3 of 5[/] — Optional metadata fallback keys")
     console.print(
         "[dim]TMDb and OMDb are only used when local cache and Wikidata cannot "
         "verify a title. Press Enter to skip either one.[/]\n"
@@ -210,11 +268,11 @@ def run_setup(existing: dict = None):
     # ── Model — fetch live from Groq ───────────────────────────────────────────
     if not cfg.get("groq_api_key"):
         cfg.pop("groq_model", None)
-        console.print("[bold]Step 4 of 4[/] — AI disabled for now")
+        console.print("[bold]Step 4 of 5[/] — AI disabled for now")
         console.print("  [dim]You can add a key and choose a model later with grimwatch setup.[/]")
         cfg["groq_model"] = FALLBACK_MODEL
     else:
-        console.print("[bold]Step 4 of 4[/] — Groq model")
+        console.print("[bold]Step 4 of 5[/] — Groq model")
         live_models = []
         with console.status("  [dim]Fetching available models from Groq…[/]"):
             live_models = _fetch_live_models(cfg["groq_api_key"])
@@ -238,6 +296,7 @@ def run_setup(existing: dict = None):
 
     console.print(f"  [green]✓[/] Using: {cfg['groq_model']}")
 
+    console.print("[bold]Step 5 of 5[/] — Saving config")
     save_config(cfg)
     console.print()
     console.print(Panel(
@@ -249,6 +308,29 @@ def run_setup(existing: dict = None):
     ))
     console.print()
     return cfg
+
+
+def get_backend(cfg: dict) -> AIBackend:
+    """Construct the configured AI backend from the active config dict.
+
+    Raises ValueError with a user-actionable message when no backend is
+    configured. Raises RuntimeError (from the backend constructor) if the
+    backend cannot initialize (missing groq package, bad credentials, etc.).
+    """
+    if cfg.get("ai_backend") == "local":
+        local = cfg.get("local_ai", {})
+        if not local.get("base_url") or not local.get("model"):
+            raise ValueError(
+                "Local AI config is incomplete. Run grimwatch setup to reconfigure."
+            )
+        return OpenAICompatibleBackend(
+            base_url=local["base_url"],
+            api_key=local.get("api_key", ""),
+        )
+    api_key = cfg.get("groq_api_key", "")
+    if not api_key:
+        raise ValueError("No AI backend configured. Run grimwatch setup.")
+    return GroqBackend(api_key=api_key)
 
 
 def migrate_model(cfg: dict) -> dict:

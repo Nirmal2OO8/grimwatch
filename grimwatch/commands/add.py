@@ -10,7 +10,7 @@ from rich.prompt import Confirm, Prompt
 from rich.table import Table
 
 from ..ai import GENRES, classify_movies, enrich_years
-from ..config import get_config
+from ..config import get_config, get_backend
 from ..parser import (
     ImportEntry,
     MovieList,
@@ -36,11 +36,15 @@ def _source_entries(input_value: str) -> tuple[list[ImportEntry], Optional[Path]
 
 def _enrich_titles(cfg: dict, entries: list[ImportEntry]) -> list[ImportEntry]:
     missing_years = [entry.title for entry in entries if extract_title_year(entry.title) is None]
-    if not missing_years or not cfg.get("groq_api_key"):
+    if not missing_years:
+        return entries
+    try:
+        backend = get_backend(cfg)
+    except ValueError:
         return entries
     try:
         with console.status(f"  [dim]Looking up years for {len(missing_years)} title(s)…[/]"):
-            years = enrich_years(cfg["groq_api_key"], cfg["groq_model"], missing_years)
+            years = enrich_years(backend, cfg["groq_model"], missing_years)
     except Exception as exc:
         warn(f"Year lookup skipped: {exc}")
         return entries
@@ -82,11 +86,13 @@ def _classify_entries(cfg: dict, entries: list[ImportEntry], force_genre: Option
     uncategorized = [entry for entry in entries if not entry.genre]
     by_title: dict[str, list[dict]] = {}
     if uncategorized:
-        if not cfg.get("groq_api_key"):
-            raise ValueError("No Groq API key. Use --genre or run grimwatch setup to classify a raw list.")
+        try:
+            backend = get_backend(cfg)
+        except ValueError as exc:
+            raise ValueError(f"AI unavailable: {exc}. Use --genre or run grimwatch setup.") from exc
         with console.status(f"  [cyan]Classifying {len(uncategorized)} source film(s)…[/]"):
             classifications = classify_movies(
-                cfg["groq_api_key"],
+                backend,
                 cfg["groq_model"],
                 [entry.title for entry in uncategorized],
                 tmdb_api_key=cfg.get("tmdb_api_key"),

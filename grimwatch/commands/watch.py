@@ -1,7 +1,7 @@
 """grimwatch watch — mark watched/unwatched, then optionally suggest next."""
 
 from rich.prompt import Confirm, Prompt
-from ..config import get_config
+from ..config import get_config, get_backend
 from ..parser import MovieList
 from ..ui import console, success, warn, error, pick_from, header, empty_state
 
@@ -45,7 +45,12 @@ def run_watch(title: str, undo: bool):
             show_inline_info(movie.title, ml)
 
         # Offer quick suggestion
-        if cfg.get("groq_api_key") and ml.unwatched():
+        _backend_available = True
+        try:
+            get_backend(cfg)
+        except ValueError:
+            _backend_available = False
+        if _backend_available and ml.unwatched():
             go = Confirm.ask("  Want a suggestion for what's next?", default=False, console=console)
             if go:
                 from ..commands.suggest import run_tonight

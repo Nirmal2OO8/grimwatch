@@ -9,7 +9,7 @@ from rich.prompt import Confirm
 from rich.table import Table
 
 from ..ai import UNCATEGORIZED_IMPORTS, classify_movies
-from ..config import get_config
+from ..config import get_config, get_backend
 from ..parser import ImportEntry, MovieList, build_merge_plan, read_import_source
 from ..ui import console, empty_state, header, short_genre, success, unquote, warn
 
@@ -19,10 +19,14 @@ def _classify_new_entries(cfg: dict, entries: list[ImportEntry]) -> list[dict]:
     result_by_line: dict[int, dict] = {}
     needs_classification = [entry for entry in entries if not entry.genre]
     if needs_classification:
-        if cfg.get("groq_api_key"):
+        try:
+            backend = get_backend(cfg)
+        except ValueError:
+            backend = None
+        if backend is not None:
             with console.status(f"  [cyan]Classifying {len(needs_classification)} incoming film(s)…[/]"):
                 classified = classify_movies(
-                    cfg["groq_api_key"],
+                    backend,
                     cfg["groq_model"],
                     [entry.title for entry in needs_classification],
                     tmdb_api_key=cfg.get("tmdb_api_key"),
@@ -31,12 +35,12 @@ def _classify_new_entries(cfg: dict, entries: list[ImportEntry]) -> list[dict]:
             for entry, result in zip(needs_classification, classified):
                 result_by_line[entry.line_number] = result
         else:
-            warn("No Groq key: uncategorized incoming films will be kept under UNCATEGORIZED IMPORTS.")
+            warn("No AI backend configured: uncategorized incoming films will be kept under UNCATEGORIZED IMPORTS.")
             for entry in needs_classification:
                 result_by_line[entry.line_number] = {
                     "title": entry.title,
                     "genre_header": UNCATEGORIZED_IMPORTS,
-                    "reason": "No AI key was configured.",
+                    "reason": "No AI backend was configured.",
                     "needs_review": True,
                 }
 

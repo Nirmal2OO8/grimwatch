@@ -34,6 +34,18 @@ _WATCHED_ON_RE = re.compile(
     re.IGNORECASE,
 )
 _NOTE_RE = re.compile(r"<!--\s*note:\s*(?P<note>[^-]*?)\s*-->", re.IGNORECASE)
+_QUALITY_RE = re.compile(
+    r"\s*<!--\s*quality:\s*(?P<score>\d+(?:\.\d+)?)\s*-->",
+    re.IGNORECASE,
+)
+_RATING_RE = re.compile(
+    r"\s*<!--\s*rating:\s*(?P<rating>\d+)\s*-->",
+    re.IGNORECASE,
+)
+_WATCHLIST_RE = re.compile(
+    r"\s*<!--\s*watchlist\s*-->",
+    re.IGNORECASE,
+)
 
 
 def _read_text(path: Path) -> tuple[str, str]:
@@ -80,6 +92,41 @@ def _extract_note(title: str) -> tuple[str, Optional[str]]:
     clean_title = (title[:match.start()] + title[match.end():]).strip()
     note = match.group("note").strip()
     return clean_title, note or None
+
+
+def _extract_quality(title: str) -> tuple[str, float | None]:
+    """Separate a quality-score annotation from a checklist title."""
+    match = _QUALITY_RE.search(title)
+    if not match:
+        return title, None
+    clean = (title[:match.start()] + title[match.end():]).strip()
+    try:
+        score = float(match.group("score"))
+        return clean, score if 0.0 <= score <= 10.0 else None
+    except ValueError:
+        return clean, None
+
+
+def _extract_rating(title: str) -> tuple[str, int | None]:
+    """Separate a user personal-rating annotation from a checklist title."""
+    match = _RATING_RE.search(title)
+    if not match:
+        return title, None
+    clean = (title[:match.start()] + title[match.end():]).strip()
+    try:
+        rating = int(match.group("rating"))
+        return clean, rating if 1 <= rating <= 10 else None
+    except ValueError:
+        return clean, None
+
+
+def _extract_watchlist(title: str) -> tuple[str, bool]:
+    """Separate a watchlist annotation from a checklist title."""
+    match = _WATCHLIST_RE.search(title)
+    if not match:
+        return title, False
+    clean = (title[:match.start()] + title[match.end():]).strip()
+    return clean, True
 
 
 def extract_title_year(title: str) -> Optional[int]:
@@ -202,6 +249,9 @@ class Movie:
     raw_line: str
     watched_on: Optional[str] = None
     note: Optional[str] = None
+    quality_score: Optional[float] = None   # 0.0-10.0, computed aggregate
+    rating: Optional[int] = None            # 1-10, user personal rating
+    on_watchlist: bool = False              # True = actively queued
 
     @property
     def clean_title(self) -> str:
@@ -217,9 +267,18 @@ class Movie:
 
     def to_line(self) -> str:
         marker = "x" if self.watched else " "
-        annotation = f" <!-- watched_on: {self.watched_on} -->" if self.watched and self.watched_on else ""
-        note = f" <!-- note: {self.note} -->" if self.note else ""
-        return f"- [{marker}] {self.title}{annotation}{note}"
+        parts = [f"- [{marker}] {self.title}"]
+        if self.watched and self.watched_on:
+            parts.append(f" <!-- watched_on: {self.watched_on} -->")
+        if self.note:
+            parts.append(f" <!-- note: {self.note} -->")
+        if self.quality_score is not None:
+            parts.append(f" <!-- quality: {self.quality_score:.2f} -->")
+        if self.rating is not None:
+            parts.append(f" <!-- rating: {self.rating} -->")
+        if self.on_watchlist:
+            parts.append(" <!-- watchlist -->")
+        return "".join(parts)
 
 
 @dataclass
@@ -239,6 +298,19 @@ class GenreBlock:
     @property
     def total(self) -> int:
         return len(self.entries)
+
+    @property
+    def coverage_ratio(self) -> float:
+        """Fraction of entries that are watched. 0.0 when total is zero."""
+        return self.watched_count / self.total if self.total else 0.0
+
+    @property
+    def quality_sorted(self) -> list["Movie"]:
+        """Entries sorted by quality_score descending; unscored films last."""
+        return sorted(
+            self.entries,
+            key=lambda m: (m.quality_score is None, -(m.quality_score or 0.0)),
+        )
 
 
 @dataclass
@@ -637,16 +709,23 @@ class MovieList:
                     current = self._append_genre("UNCATEGORIZED")
                 raw_title, note = _extract_note(checkbox.group("title"))
                 raw_title, watched_on = _extract_watched_on(raw_title)
+                raw_title, quality_score = _extract_quality(raw_title)
+                raw_title, rating = _extract_rating(raw_title)
+                raw_title, on_watchlist = _extract_watchlist(raw_title)
                 title = clean_display_title(raw_title)
                 if title:
+                    is_watched = checkbox.group("mark").casefold() == "x"
                     current.entries.append(
                         Movie(
                             title=title,
-                            watched=checkbox.group("mark").casefold() == "x",
+                            watched=is_watched,
                             genre=current.header,
                             raw_line=line,
-                            watched_on=watched_on if checkbox.group("mark").casefold() == "x" else None,
+                            watched_on=watched_on if is_watched else None,
                             note=note,
+                            quality_score=quality_score,
+                            rating=rating,
+                            on_watchlist=on_watchlist,
                         )
                     )
                 continue

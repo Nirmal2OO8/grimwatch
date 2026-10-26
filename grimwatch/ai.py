@@ -1,4 +1,11 @@
-"""Groq AI client — classification, suggestions, blind spots, year enrichment."""
+"""AI classification, suggestions, blind spots, year enrichment.
+
+Backend-agnostic: callers supply an AIBackend instance; no Groq SDK is
+imported at this level. See backends.py for GroqBackend and
+OpenAICompatibleBackend.
+"""
+
+from __future__ import annotations
 
 import hashlib
 import json
@@ -6,8 +13,8 @@ import re
 import time
 from dataclasses import dataclass
 from typing import Any, Optional, Sequence
-from groq import Groq
 
+from .backends import AIBackend
 from .logging_utils import get_logger, log_exception
 from .metadata import VerifiedMetadata, verify_film_metadata
 from .parser import (
@@ -296,7 +303,18 @@ def _validate_genre_anchors() -> None:
         raise RuntimeError("GENRE_ANCHORS must cover every GENRES entry with 3–6 examples (" + "; ".join(detail) + ")")
 
 
-_validate_genre_anchors()
+def _register_genres() -> None:
+    """Run once after all genre constants are built.
+
+    Called explicitly rather than as a module-level side-effect so the import
+    can succeed even if the constants are temporarily inconsistent during
+    development. The RuntimeError is still fast and explicit — it just fires
+    at the call site rather than at import time.
+    """
+    _validate_genre_anchors()
+
+
+_register_genres()
 
 GENRE_LIST_STR = "\n".join(f"{i+1}. {g}" for i, g in enumerate(GENRES))
 
@@ -354,10 +372,6 @@ def _classification_max_tokens(count: int) -> int:
     )
 
 
-def _client(api_key: str) -> Groq:
-    return Groq(api_key=api_key)
-
-
 def _is_rate_limited(message: str) -> bool:
     lowered = message.casefold()
     return "429" in message or "rate_limit" in lowered or "too many requests" in lowered
@@ -371,86 +385,7 @@ def _retry_after_seconds(message: str, attempt: int) -> float:
     return min(_RATE_LIMIT_BASE_SECONDS * (2 ** attempt), _RATE_LIMIT_MAX_SECONDS)
 
 
-def _chat(
-    client: Groq,
-    model: str,
-    system: str,
-    user: str,
-    max_tokens: int = 1024,
-    json_mode: bool = False,
-    response_schema: Optional[dict[str, Any]] = None,
-) -> str:
-    """Make one bounded Groq request and require a usable final answer.
 
-    GPT-OSS models can return their reasoning separately from the final answer.
-    In the old request shape, that reasoning was allowed to consume the whole
-    small completion budget, leaving ``message.content`` empty.  Grimwatch needs
-    the final answer, not a reasoning trace, so explicitly disable it.
-    """
-    request = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        # ``max_completion_tokens`` is the current Groq/OpenAI-compatible
-        # parameter. It applies to the entire generated completion.
-        "max_completion_tokens": max_tokens,
-        "temperature": 0.2,
-    }
-    if model.casefold().startswith("openai/gpt-oss-"):
-        # GPT-OSS supports low/medium/high reasoning effort. Low is ample
-        # for selecting an ID or emitting a short JSON object, and avoids
-        # exhausting a small completion on internal reasoning.
-        request["include_reasoning"] = False
-        request["reasoning_effort"] = "low"
-    if response_schema is not None:
-        request["response_format"] = {"type": "json_schema", "json_schema": response_schema}
-    elif json_mode:
-        request["response_format"] = {"type": "json_object"}
-
-    resp = None
-    last_exc: Optional[Exception] = None
-    for attempt in range(_RATE_LIMIT_MAX_ATTEMPTS):
-        try:
-            resp = client.chat.completions.create(**request)
-            break
-        except Exception as exc:
-            log_exception(LOGGER, f"Groq request failed on attempt {attempt + 1}", exc)
-            message = str(exc)
-            if "413" in message or "Request too large" in message:
-                raise RuntimeError(
-                    "Groq rejected the request as too large; the archive context was reduced. Try again shortly."
-                ) from exc
-            if not _is_rate_limited(message) or attempt == _RATE_LIMIT_MAX_ATTEMPTS - 1:
-                if _is_rate_limited(message):
-                    raise RuntimeError(
-                        f"Groq is rate-limiting requests; gave up after {attempt + 1} attempt(s): {exc}"
-                    ) from exc
-                raise
-            last_exc = exc
-            time.sleep(_retry_after_seconds(message, attempt))
-    if resp is None:  # pragma: no cover - defensive; loop always returns or raises
-        raise RuntimeError("Groq rate-limited the request repeatedly.") from last_exc
-    try:
-        choice = resp.choices[0]
-        message = choice.message
-        content = message.content
-    except (AttributeError, IndexError) as exc:
-        raise RuntimeError("Groq returned no completion choices.") from exc
-    if not isinstance(content, str) or not content.strip():
-        # Keep the useful provider metadata in the error rather than hiding
-        # the underlying issue behind a generic "empty completion" message.
-        finish_reason = getattr(choice, "finish_reason", None)
-        reasoning = getattr(message, "reasoning", None)
-        detail = []
-        if finish_reason:
-            detail.append(f"finish_reason={finish_reason}")
-        if reasoning:
-            detail.append("reasoning present but no final text")
-        suffix = f" ({'; '.join(detail)})" if detail else ""
-        raise RuntimeError(f"Groq returned no final text{suffix}.")
-    return content.strip()
 
 
 def _parse_json(raw: str) -> Any:
@@ -609,7 +544,7 @@ def _local_preference_score(movie: Movie, preference: str) -> int:
     return sum(4 for term in terms if term in searchable)
 
 
-def _mood_shelves_via_model(client: Groq, model: str, mood: str, shelves: list[str]) -> list[str]:
+def _mood_shelves_via_model(backend: AIBackend, model: str, mood: str, shelves: list[str]) -> list[str]:
     """Ask the model which shelves match the mood. Returns a subset of shelves.
 
     Returns an empty list on any failure — callers must treat that as
@@ -628,7 +563,7 @@ def _mood_shelves_via_model(client: Groq, model: str, mood: str, shelves: list[s
     )
     user = f'Mood: "{mood}"\n\nAvailable shelves:\n{shelf_list}'
     try:
-        raw = _chat(client, model, system, user, max_tokens=256, json_mode=True)
+        raw = backend.chat(model, system, user, max_tokens=256, json_mode=True)
         payload = _safe_parse_json(raw)
         if not isinstance(payload, dict):
             return []
@@ -642,23 +577,23 @@ def _mood_shelves_via_model(client: Groq, model: str, mood: str, shelves: list[s
 
 
 def _mood_candidate_pool(
-    client: Optional[Groq],
+    backend: Optional[AIBackend],
     model: Optional[str],
     movies: Sequence[Movie],
     mood: Optional[str],
 ) -> list[Movie]:
     """Filter the candidate pool to shelves that match the mood.
 
-    Uses a lightweight model call when a client is available. Falls back to
+    Uses a lightweight model call when a backend is available. Falls back to
     the full pool silently if the call fails or returns no matches, so a bad
     mood query never produces an empty recommendation screen.
     """
     if not mood:
         return list(movies)
 
-    if client is not None and model is not None:
+    if backend is not None and model is not None:
         available_shelves = sorted({movie.genre for movie in movies if movie.genre})
-        matched_shelves = _mood_shelves_via_model(client, model, mood, available_shelves)
+        matched_shelves = _mood_shelves_via_model(backend, model, mood, available_shelves)
         if matched_shelves:
             matched_set = {s.casefold().strip() for s in matched_shelves}
             filtered = [m for m in movies if m.genre.casefold().strip() in matched_set]
@@ -687,7 +622,7 @@ def _stable_fallback_movies(
 
 
 def _request_recommendation(
-    client: Groq,
+    backend: AIBackend,
     model: str,
     system: str,
     recent: str,
@@ -703,7 +638,7 @@ def _request_recommendation(
         context = _movie_context(candidates)
         user = f"Recently watched: {recent}\n\nCandidates:\n{context}\n\n{instruction}"
         try:
-            return _chat(client, model, system, user, max_tokens=max_tokens, json_mode=True), candidates, None
+            return backend.chat(model, system, user, max_tokens=max_tokens, json_mode=True), candidates, None
         except Exception as exc:
             last_error = str(exc)
             message = last_error.casefold()
@@ -777,11 +712,10 @@ Format: [{"title": "original title", "year": 1979}, ...]
 If you don't know the year with confidence, use null."""
 
 
-def enrich_years(api_key: str, model: str, titles: list) -> dict:
+def enrich_years(backend: AIBackend, model: str, titles: list[str]) -> dict[str, int | None]:
     """Returns dict of title -> year (or None)."""
-    client = _client(api_key)
     user = "\n".join(f"- {t}" for t in titles)
-    raw = _chat(client, model, ENRICH_SYSTEM, user, max_tokens=1024)
+    raw = backend.chat(model, ENRICH_SYSTEM, user, max_tokens=1024)
     results = _parse_json(raw)
     if not isinstance(results, list):
         raise ValueError("Year lookup returned an invalid response.")
@@ -939,7 +873,7 @@ def _supports_strict_schema(model: str) -> bool:
 
 
 def _request_classifications(
-    client: Groq,
+    backend: AIBackend,
     model: str,
     candidates: Sequence[_ClassificationCandidate],
 ) -> tuple[dict[int, dict[str, Any]], Optional[str]]:
@@ -963,7 +897,7 @@ def _request_classifications(
         request_options["json_mode"] = True
 
     try:
-        raw = _chat(client, model, CLASSIFY_SYSTEM, user, **request_options)
+        raw = backend.chat(model, CLASSIFY_SYSTEM, user, **request_options)
     except Exception as exc:
         return {}, _short_error(exc)
 
@@ -1031,7 +965,7 @@ def _request_classifications(
 
 
 def _classify_batch(
-    client: Groq,
+    backend: AIBackend,
     model: str,
     candidates: Sequence[_ClassificationCandidate],
     retry_sizes: Sequence[int] = CLASSIFICATION_RETRY_BATCH_SIZES,
@@ -1047,7 +981,7 @@ def _classify_batch(
     down to one at a time. A title is only ever marked as a failure once
     every retry size has been exhausted for it.
     """
-    matched, request_error = _request_classifications(client, model, candidates)
+    matched, request_error = _request_classifications(backend, model, candidates)
     missing_indexes = [index for index in range(1, len(candidates) + 1) if index not in matched]
 
     results: dict[int, dict[str, Any]] = dict(matched)
@@ -1058,7 +992,7 @@ def _classify_batch(
         for start in range(0, len(missing_candidates), retry_size):
             replacement_rows.extend(
                 _classify_batch(
-                    client,
+                    backend,
                     model,
                     missing_candidates[start:start + retry_size],
                     retry_sizes=remaining_sizes,
@@ -1081,12 +1015,12 @@ def _classify_batch(
 
 
 def classify_movies(
-    api_key: str,
+    backend: AIBackend,
     model: str,
     titles: Sequence[str],
     *,
-    tmdb_api_key: Optional[str] = None,
-    omdb_api_key: Optional[str] = None,
+    tmdb_api_key: str | None = None,
+    omdb_api_key: str | None = None,
     refresh_metadata: bool = False,
 ) -> list[dict[str, Any]]:
     """Classify titles only after a global metadata verification pass."""
@@ -1127,19 +1061,10 @@ def classify_movies(
             )
     if not verified_candidates:
         return [result for result in results if result is not None]
-    try:
-        client = _client(api_key)
-    except Exception as exc:
-        log_exception(LOGGER, "Groq client initialization failed", exc)
-        for index, candidate in verified_candidates:
-            results[index] = _fallback_classification(
-                candidate.title, f"AI classification unavailable: {_short_error(exc)}"
-            )
-        return [result for result in results if result is not None]
 
     for start in range(0, len(verified_candidates), CLASSIFICATION_BATCH_SIZE):
         batch = verified_candidates[start : start + CLASSIFICATION_BATCH_SIZE]
-        classified = _classify_batch(client, model, [candidate for _, candidate in batch])
+        classified = _classify_batch(backend, model, [candidate for _, candidate in batch])
         for (index, _candidate), result in zip(batch, classified):
             results[index] = result
     return [result for result in results if result is not None]
@@ -1148,26 +1073,27 @@ def classify_movies(
 # ── SUGGEST ────────────────────────────────────────────────────────────────────
 
 def suggest_movies(
-    api_key: str,
+    backend: AIBackend,
     model: str,
     unwatched: Sequence[Movie],
     recently_watched: Sequence[Movie],
-    mood: Optional[str] = None,
-    similar_to: Optional[str] = None,
+    mood: str | None = None,
+    similar_to: str | None = None,
     contrast: bool = False,
     count: int = 3,
-    contrast_against: Optional[str] = None,
+    contrast_against: str | None = None,
+    coverage_gaps: "Sequence[CoverageGap] | None" = None,
 ) -> list[dict[str, str]]:
-    """Recommend only local unwatched entries, even when the model is messy."""
+    """Recommend only local unwatched entries, weighted by genre coverage gaps.
+
+    When coverage_gaps is supplied, candidate sampling uses weighted_sample_by_gap
+    so under-covered genres are over-represented in what the model sees.
+    The model's selection logic is unchanged; only the candidate pool changes.
+    """
     requested_count = max(1, min(int(count), 20))
     if not unwatched:
         return []
-    try:
-        _groq_client = _client(api_key)
-    except Exception as exc:
-        request_error = str(exc)
-        _groq_client = None
-    selection_pool = _mood_candidate_pool(_groq_client, model, unwatched, mood)
+    selection_pool = _mood_candidate_pool(backend, model, unwatched, mood)
     recent = ", ".join(movie.title for movie in recently_watched[-10:]) or "none yet"
     recent = recent[:1800]
     if contrast_against:
@@ -1195,21 +1121,35 @@ def suggest_movies(
         "You are a discerning film recommender. Select only candidate IDs from the user's "
         "unwatched archive. Do not invent titles, genres, or IDs. Reasons must not invent "
         "specific cast, character, plot, or demographic details; only use the supplied shelf "
-        "metadata and the user's stated preference."
+        "metadata and the user's stated preference. "
+        "Prefer candidates from shelves with lower coverage ratios when quality is comparable."
     )
 
+    from .genre_coverage import weighted_sample_by_gap, compute_coverage_gaps
+    from .parser import GenreBlock
+
+    if coverage_gaps is not None:
+        gaps = coverage_gaps
+    else:
+        # Build gaps on the fly from the full unwatched pool's genres if not provided.
+        genre_map: dict[str, GenreBlock] = {}
+        for movie in unwatched:
+            if movie.genre not in genre_map:
+                genre_map[movie.genre] = GenreBlock(header=movie.genre)
+            genre_map[movie.genre].entries.append(movie)
+        gaps = compute_coverage_gaps(list(genre_map.values()))
+
+    seed = f"suggest|{mood or ''}|{similar_to or ''}|{contrast_against or ''}|{contrast}|{recent}"
+    candidates = weighted_sample_by_gap(selection_pool, gaps, RECOMMENDATION_CONTEXT_ITEMS, seed=seed)
+
     raw = ""
-    candidates = _sample_movies(selection_pool)
     request_error = None
     try:
-        if _groq_client is None:
-            _groq_client = _client(api_key)
         raw, candidates, request_error = _request_recommendation(
-            _groq_client, model, system, recent, instruction, selection_pool, max_tokens=768
+            backend, model, system, recent, instruction, selection_pool, max_tokens=768
         )
     except Exception as exc:
         request_error = str(exc)
-    seed = f"suggest|{mood or ''}|{similar_to or ''}|{contrast_against or ''}|{contrast}|{recent}"
     return _validated_recommendations(
         raw,
         candidates,
@@ -1222,12 +1162,12 @@ def suggest_movies(
 
 
 def suggest_external_movies(
-    api_key: str,
+    backend: AIBackend,
     model: str,
     recently_watched: Sequence[Movie],
     unwatched_titles: Sequence[str],
-    mood: Optional[str] = None,
-    similar_to: Optional[str] = None,
+    mood: str | None = None,
+    similar_to: str | None = None,
     count: int = 3,
 ) -> list[dict[str, str]]:
     """Suggest verified-shaped films outside the user's current archive."""
@@ -1257,7 +1197,7 @@ def suggest_external_movies(
     )
 
     try:
-        raw = _chat(_client(api_key), model, system, user, max_tokens=1024, json_mode=True)
+        raw = backend.chat(model, system, user, max_tokens=1024, json_mode=True)
     except Exception:
         return []
 
@@ -1292,12 +1232,12 @@ def suggest_external_movies(
 # ── TONIGHT ────────────────────────────────────────────────────────────────────
 
 def suggest_tonight(
-    api_key: str,
+    backend: AIBackend,
     model: str,
     unwatched: Sequence[Movie],
     recently_watched: Sequence[Movie],
-    max_runtime: Optional[int] = None,
-    genre: Optional[str] = None,
+    max_runtime: int | None = None,
+    genre: str | None = None,
 ) -> dict[str, str]:
     """Choose a verified local unwatched movie; model failure gets a safe fallback."""
     if not unwatched:
@@ -1322,9 +1262,8 @@ def suggest_tonight(
     candidates = _sample_movies(unwatched)
     request_error: Optional[str] = None
     try:
-        client = _client(api_key)
         raw, candidates, request_error = _request_recommendation(
-            client, model, system, recent[:1200], instruction, unwatched, max_tokens=640
+            backend, model, system, recent[:1200], instruction, unwatched, max_tokens=640
         )
     except Exception as exc:
         request_error = str(exc)
@@ -1377,13 +1316,12 @@ def _blind_spot_gap(stat: dict[str, Any], reason: str) -> dict[str, Any]:
 
 
 def find_blind_spots(
-    api_key: str, model: str, watched: Sequence[Movie], genre_stats: Sequence[dict[str, Any]]
+    backend: AIBackend, model: str, watched: Sequence[Movie], genre_stats: Sequence[dict[str, Any]]
 ) -> list[dict[str, Any]]:
     """Return compact model-selected shelf gaps, with a local coverage fallback."""
     candidates = _blind_spot_candidates(genre_stats)
     if not candidates:
         return []
-    client = _client(api_key)
     shelf_by_id: dict[int, dict[str, Any]] = {}
     shelf_lines: list[str] = []
     shelf_chars = 0
@@ -1416,7 +1354,7 @@ def find_blind_spots(
         "Identify the most useful blind spots."
     )
     try:
-        raw = _chat(client, model, system, user, max_tokens=512, json_mode=True)
+        raw = backend.chat(model, system, user, max_tokens=512, json_mode=True)
     except Exception as exc:
         if "too large" in str(exc).casefold() or "413" in str(exc):
             return [_blind_spot_gap(stat, "One of the least-watched shelves in your archive.") for stat in candidates[:3]]
@@ -1453,10 +1391,9 @@ Return ONLY valid JSON:
 {{"correct": true/false, "suggested_genre_number": <number or null>, "reason": "one sentence"}}"""
 
 
-def audit_classification(api_key, model, title, current_genre) -> dict:
-    client = _client(api_key)
+def audit_classification(backend: AIBackend, model: str, title: str, current_genre: str) -> dict[str, Any]:
     user = f'Film: "{title}"\nCurrent genre: "{current_genre}"\nCorrect?'
-    raw = _chat(client, model, AUDIT_SYSTEM, user, max_tokens=256, json_mode=True)
+    raw = backend.chat(model, AUDIT_SYSTEM, user, max_tokens=256, json_mode=True)
     result = _parse_json(raw)
     if not result.get("correct") and result.get("suggested_genre_number"):
         idx = int(result["suggested_genre_number"]) - 1

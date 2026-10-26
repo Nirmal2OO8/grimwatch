@@ -2,7 +2,8 @@
 
 from typing import Optional
 from rich.prompt import Prompt, Confirm
-from ..config import get_config, recent_recommendation_titles, record_recommendations
+from ..config import get_config, get_backend, recent_recommendation_titles, record_recommendations
+from ..genre_coverage import compute_coverage_gaps
 from ..parser import Movie, MovieList, normalized_title_key
 from ..ai import suggest_movies, suggest_tonight
 from ..ui import console, success, error, suggestion_card, header, empty_state, warn
@@ -70,11 +71,11 @@ def run_suggest(
         empty_state("THE ARCHIVE IS CLEARED", "Every film is marked watched. Add something new with grimwatch add.")
         return
 
-    if not cfg.get("groq_api_key"):
-        error("No Groq API key. Run setup first.")
+    try:
+        backend = get_backend(cfg)
+    except ValueError as exc:
+        error(str(exc))
         return
-
-    pool, excluded_count = _recommendation_pool(unwatched, cfg)
 
     resolved_contrast = contrast_against.strip() if contrast_against else None
     if contrast and not resolved_contrast and watched:
@@ -91,10 +92,15 @@ def run_suggest(
     else:
         heading = "What to watch next"
 
-    try:
-        with console.status(f"  [reelq.violet]Consulting the oracle…[/]"):
+    gaps = compute_coverage_gaps(ml.genres)
+
+    with console.status("") as status:
+        status.update("  [reelq.dim]Sampling your archive…[/]")
+        pool, excluded_count = _recommendation_pool(unwatched, cfg)
+        status.update("  [reelq.violet]Sending to model…[/]")
+        try:
             results = suggest_movies(
-                api_key=cfg["groq_api_key"],
+                backend=backend,
                 model=cfg["groq_model"],
                 unwatched=pool,
                 recently_watched=watched,
@@ -103,10 +109,12 @@ def run_suggest(
                 contrast=contrast,
                 count=count,
                 contrast_against=resolved_contrast,
+                coverage_gaps=gaps,
             )
-    except Exception as exc:
-        error(f"Could not get suggestions: {exc}")
-        return
+        except Exception as exc:
+            error(f"Could not get suggestions: {exc}")
+            return
+        status.update("  [reelq.success]Mapping results…[/]")
 
     header("THE ORACLE SPEAKS", heading)
     if excluded_count:
@@ -143,11 +151,17 @@ def _run_external_suggest(
     from ..ai import suggest_external_movies
     from .add import run_add
 
+    try:
+        backend = get_backend(cfg)
+    except ValueError as exc:
+        error(str(exc))
+        return
+
     unwatched_titles = [movie.title for movie in ml.all_movies() if not movie.watched]
     try:
         with console.status("  [reelq.violet]Searching beyond the archive…[/]"):
             results = suggest_external_movies(
-                api_key=cfg["groq_api_key"],
+                backend=backend,
                 model=cfg["groq_model"],
                 recently_watched=watched,
                 unwatched_titles=unwatched_titles,
@@ -190,8 +204,10 @@ def run_tonight(max_runtime: Optional[int], genre: Optional[str] = None):
         empty_state("THE ARCHIVE IS CLEARED", "There is no unwatched film left for tonight.")
         return
 
-    if not cfg.get("groq_api_key"):
-        error("No Groq API key. Run setup first.")
+    try:
+        backend = get_backend(cfg)
+    except ValueError as exc:
+        error(str(exc))
         return
 
     pool, excluded_count = _recommendation_pool(unwatched, cfg)
@@ -199,7 +215,7 @@ def run_tonight(max_runtime: Optional[int], genre: Optional[str] = None):
     try:
         with console.status("  [reelq.accent]Choosing tonight's screening…[/]"):
             result = suggest_tonight(
-                api_key=cfg["groq_api_key"],
+                backend=backend,
                 model=cfg["groq_model"],
                 unwatched=pool,
                 recently_watched=watched,

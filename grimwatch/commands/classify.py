@@ -9,7 +9,7 @@ from rich import box
 from rich.table import Table
 
 from ..ai import GENRES, UNCATEGORIZED_IMPORTS, classify_movies
-from ..config import get_config
+from ..config import get_config, get_backend
 from ..parser import coalesce_import_entries, read_import_source, write_classified_markdown
 from ..ui import console, error, header, short_genre, success, unquote, warn
 
@@ -75,8 +75,10 @@ def run_classify(
     if not entries:
         error("No film entries were found in that source file.")
         return
-    if not cfg.get("groq_api_key"):
-        error("No Groq API key. Run grimwatch setup before classifying an import file.")
+    try:
+        backend = get_backend(cfg)
+    except ValueError as exc:
+        error(str(exc))
         return
 
     header("CLASSIFY IMPORT", f"source: {source.path.name}  //  {source.format} {source.encoding}")
@@ -88,7 +90,7 @@ def run_classify(
     try:
         with console.status(f"  [cyan]Classifying {len(entries)} source film(s)…[/]"):
             results = classify_movies(
-                cfg["groq_api_key"],
+                backend,
                 cfg["groq_model"],
                 [entry.title for entry in entries],
                 tmdb_api_key=cfg.get("tmdb_api_key"),

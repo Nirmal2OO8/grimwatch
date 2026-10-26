@@ -316,10 +316,12 @@ def info(
 
 
 @app.command()
-def stats():
-    """Progress, decade heatmap, and under-covered shelf analysis."""
+def stats(
+    ai: bool = typer.Option(False, "--ai", help="Run AI blind-spot analysis after the deterministic stats"),
+):
+    """Progress, decade heatmap, coverage gaps, and optional AI blind-spot analysis."""
     from .commands.stats import run_stats
-    run_stats()
+    run_stats(ai=ai)
 
 
 @app.command()
