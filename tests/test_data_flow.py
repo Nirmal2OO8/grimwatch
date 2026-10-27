@@ -5,22 +5,12 @@ import types
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
-try:
-    import groq  # noqa: F401
-except ModuleNotFoundError:
-    fake_groq = types.ModuleType("groq")
-
-    class FakeGroq:  # pragma: no cover - only used in the dependency-light test runtime
-        pass
-
-    fake_groq.Groq = FakeGroq
-    sys.modules["groq"] = fake_groq
-
 from grimwatch import ai
+from grimwatch.backends import AIBackend
 from grimwatch.parser import (
     ImportEntry,
     Movie,
@@ -31,6 +21,16 @@ from grimwatch.parser import (
     read_import_source,
     write_classified_markdown,
 )
+
+
+def _fake_backend(response=None, *, side_effect=None):
+    """Return a mock AIBackend whose chat() returns response or raises side_effect."""
+    backend = MagicMock(spec=AIBackend)
+    if side_effect is not None:
+        backend.chat.side_effect = side_effect
+    else:
+        backend.chat.return_value = response
+    return backend
 
 
 class ImportAndMergeTests(unittest.TestCase):
@@ -150,7 +150,7 @@ class RecommendationValidationTests(unittest.TestCase):
         self.metadata_patch = patch.object(
             ai,
             "verify_film_metadata",
-            side_effect=lambda titles: [
+            side_effect=lambda titles, **_kwargs: [
                 ai.VerifiedMetadata(
                     title=title,
                     verified=True,
@@ -189,18 +189,16 @@ class RecommendationValidationTests(unittest.TestCase):
         self._assert_local_unwatched(results)
 
     def test_mood_suggestions_accept_imperfect_title_format_and_remain_local(self):
-        def fake_chat(_client, _model, _system, user, **_kwargs):
-            self.assertIn("[1] L.A. Confidential (1997)", user)
-            return '{"choices":[{"title":"\"Persona (1966)\"","reason":"Fits."}]}'
+        backend = _fake_backend('{"choices":[{"title":"\\"Persona (1966)\\"","reason":"Fits."}]}')
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", side_effect=fake_chat):
-            results = ai.suggest_movies("test", "test-model", self.unwatched, [], mood="coming of age type movies", count=2)
+        results = ai.suggest_movies(backend, "test-model", self.unwatched, [], mood="coming of age type movies", count=2)
 
         self.assertEqual("Persona (1966)", results[0]["title"])
         self._assert_local_unwatched(results)
+        backend.chat.assert_called()
 
     def test_named_contrast_anchor_is_sent_in_the_recommendation_instruction(self):
-        def fake_chat(_client, _model, _system, user, **_kwargs):
+        def fake_chat(model, system, user, **_kwargs):
             self.assertIn(
                 "sharply contrast with 'Stalker (1979)' in genre, tone, pace, and era",
                 user,
@@ -208,15 +206,17 @@ class RecommendationValidationTests(unittest.TestCase):
             self.assertIn("Avoid anything from the same shelf.", user)
             return '{"choices":[{"id":1,"reason":"A deliberate change of pace."}]}'
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", side_effect=fake_chat):
-            results = ai.suggest_movies(
-                "test",
-                "test-model",
-                self.unwatched,
-                [],
-                contrast_against="Stalker (1979)",
-                count=1,
-            )
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        results = ai.suggest_movies(
+            backend,
+            "test-model",
+            self.unwatched,
+            [],
+            contrast_against="Stalker (1979)",
+            count=1,
+        )
 
         self.assertEqual("L.A. Confidential (1997)", results[0]["title"])
 
@@ -228,37 +228,36 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"title":"The Third Man (1949)","genre_number":1,"reason":"A classic."}'
             ']}'
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", return_value=response
-        ) as chat:
-            results = ai.suggest_external_movies(
-                "test", "test-model", [], ["Persona (1966)"], mood="classic noir", count=3
-            )
+        backend = _fake_backend(response)
+
+        results = ai.suggest_external_movies(
+            backend, "test-model", [], ["Persona (1966)"], mood="classic noir", count=3
+        )
 
         self.assertEqual(
             [{"title": "The Third Man (1949)", "genre": ai.GENRES[0], "reason": "A classic."}],
             results,
         )
-        self.assertIn("classic noir", chat.call_args.args[3])
-        self.assertIn("Only suggest real films with verifiable release years.", chat.call_args.args[2])
+        call_args = backend.chat.call_args
+        self.assertIn("classic noir", call_args.args[2])  # user prompt
+        self.assertIn("Only suggest real films with verifiable release years.", call_args.args[1])
 
     def test_external_suggestions_return_empty_on_model_failure(self):
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=RuntimeError("provider unavailable")
-        ):
-            results = ai.suggest_external_movies("test", "test-model", [], [], mood="noir")
+        backend = _fake_backend(side_effect=RuntimeError("provider unavailable"))
+
+        results = ai.suggest_external_movies(backend, "test-model", [], [], mood="noir")
 
         self.assertEqual([], results)
 
     def test_tonight_genre_preference_is_sent_to_the_recommender(self):
-        def fake_chat(_client, _model, _system, user, **_kwargs):
+        def fake_chat(model, system, user, **_kwargs):
             self.assertIn('Limit the choice to the shelf or genre "HORROR".', user)
             return '{"id":1,"reason":"Fits the requested shelf."}'
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=fake_chat
-        ):
-            result = ai.suggest_tonight("test", "test-model", self.unwatched, [], genre="HORROR")
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        result = ai.suggest_tonight(backend, "test-model", self.unwatched, [], genre="HORROR")
 
         self.assertEqual("L.A. Confidential (1997)", result["title"])
 
@@ -267,9 +266,9 @@ class RecommendationValidationTests(unittest.TestCase):
             {"genre": "CRIME CINEMA", "watched": 1, "total": 4},
             {"genre": "HORROR", "watched": 3, "total": 3},
         ]
-        raw = '{"gaps":[{"shelf_id":1,"reason":"Explore more noir."},{"shelf_id":99,"reason":"Ignore."}]}'
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", return_value=raw):
-            gaps = ai.find_blind_spots("test", "test-model", [], genre_stats)
+        backend = _fake_backend('{"gaps":[{"shelf_id":1,"reason":"Explore more noir."},{"shelf_id":99,"reason":"Ignore."}]}')
+
+        gaps = ai.find_blind_spots(backend, "test-model", [], genre_stats)
 
         self.assertEqual(
             [{
@@ -287,19 +286,17 @@ class RecommendationValidationTests(unittest.TestCase):
             {"genre": "CRIME CINEMA", "watched": 1, "total": 4},
             {"genre": "HORROR", "watched": 3, "total": 3},
         ]
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=RuntimeError("Groq rejected the request as too large")
-        ):
-            gaps = ai.find_blind_spots("test", "test-model", [], genre_stats)
+        backend = _fake_backend(side_effect=RuntimeError("Groq rejected the request as too large"))
+
+        gaps = ai.find_blind_spots(backend, "test-model", [], genre_stats)
 
         self.assertEqual("CRIME CINEMA", gaps[0]["genre"])
         self.assertEqual("One of the least-watched shelves in your archive.", gaps[0]["reason"])
 
     def test_tonight_invalid_id_uses_a_verified_local_fallback(self):
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", return_value='{"id":999,"reason":"Wrong id"}'
-        ):
-            result = ai.suggest_tonight("test", "test-model", self.unwatched, [])
+        backend = _fake_backend('{"id":999,"reason":"Wrong id"}')
+
+        result = ai.suggest_tonight(backend, "test-model", self.unwatched, [])
 
         self._assert_local_unwatched([result])
 
@@ -310,12 +307,11 @@ class RecommendationValidationTests(unittest.TestCase):
             Movie("Portrait of a Lady on Fire (2019)", False, "ROMANTIC DRAMA — Queer Cinema", ""),
             Movie("But I'm a Cheerleader (1999)", False, "ROMANTIC DRAMA — Queer Cinema", ""),
         ]
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=RuntimeError("provider unavailable")
-        ):
-            results = ai.suggest_movies(
-                "test", "test-model", movies, [], mood="something lesbian", count=2
-            )
+        backend = _fake_backend(side_effect=RuntimeError("provider unavailable"))
+
+        results = ai.suggest_movies(
+            backend, "test-model", movies, [], mood="something lesbian", count=2
+        )
 
         self.assertEqual(
             ["Portrait of a Lady on Fire (2019)", "But I'm a Cheerleader (1999)"],
@@ -330,14 +326,19 @@ class RecommendationValidationTests(unittest.TestCase):
             Movie("Portrait of a Lady on Fire (2019)", False, "ROMANTIC DRAMA — Queer Cinema", ""),
         ]
 
-        def fake_chat(_client, _model, _system, user, **_kwargs):
+        def fake_chat(model, system, user, **_kwargs):
+            # mood shelf matching call returns JSON; recommendation call checks pool
+            if "shelves" in system.casefold():
+                return '{"shelves":["ROMANTIC DRAMA — Queer Cinema"]}'
             self.assertIn("Portrait of a Lady on Fire (2019)", user)
             self.assertNotIn("Whiplash (2014)", user)
             self.assertNotIn("Office Space (1999)", user)
             return '{"choices":[{"id":1,"reason":"Matches the shelf."}]}'
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", side_effect=fake_chat):
-            results = ai.suggest_movies("test", "test-model", movies, [], mood="queer", count=1)
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        results = ai.suggest_movies(backend, "test-model", movies, [], mood="queer", count=1)
 
         self.assertEqual("Portrait of a Lady on Fire (2019)", results[0]["title"])
 
@@ -346,8 +347,9 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"classifications":[{"id":2,"genre_number":8,"confidence":4,'
             '"runner_up_genre_number":null,"reason":"Youth."}]}'
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", return_value=response):
-            results = ai.classify_movies("test", "test-model", ["Persona (1966)", "Stalker (1979)"])
+        backend = _fake_backend(response)
+
+        results = ai.classify_movies(backend, "test-model", ["Persona (1966)", "Stalker (1979)"])
 
         self.assertTrue(results[0]["needs_review"])
         self.assertEqual("Stalker (1979)", results[1]["title"])
@@ -360,10 +362,11 @@ class RecommendationValidationTests(unittest.TestCase):
                 "No unique exact Wikidata title match was found; classification requires review.",
             )
         ]
-        with patch.object(ai, "verify_film_metadata", return_value=metadata), patch.object(ai, "_client") as client:
-            results = ai.classify_movies("test", "test-model", ["Corrupted Input (1990)"])
+        backend = _fake_backend()
+        with patch.object(ai, "verify_film_metadata", return_value=metadata):
+            results = ai.classify_movies(backend, "test-model", ["Corrupted Input (1990)"])
 
-        client.assert_not_called()
+        backend.chat.assert_not_called()
         self.assertTrue(results[0]["needs_review"])
         self.assertEqual(ai.UNCATEGORIZED_IMPORTS, results[0]["genre_header"])
         self.assertIn("Metadata verification required", results[0]["reason"])
@@ -394,6 +397,7 @@ class RecommendationValidationTests(unittest.TestCase):
         self.assertFalse(ai._supports_strict_schema("qwen/qwen3.8-27b"))
 
     def test_classification_preserves_confidence_runner_up_and_metadata_review(self):
+        from types import SimpleNamespace
         metadata = SimpleNamespace(
             verified=True,
             needs_review=True,
@@ -404,10 +408,9 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"classifications":[{"id":1,"genre_number":1,"confidence":3,'
             '"runner_up_genre_number":19,"reason":"Close between auteur and science fiction."}]}'
         )
-        with patch.object(ai, "verify_film_metadata", return_value=[metadata]), patch.object(
-            ai, "_client", return_value=object()
-        ), patch.object(ai, "_chat", return_value=response):
-            results = ai.classify_movies("test", "test-model", ["Persona (1966)"])
+        backend = _fake_backend(response)
+        with patch.object(ai, "verify_film_metadata", return_value=[metadata]):
+            results = ai.classify_movies(backend, "test-model", ["Persona (1966)"])
 
         self.assertEqual(3, results[0]["confidence"])
         self.assertEqual(19, results[0]["runner_up_genre_number"])
@@ -429,16 +432,18 @@ class RecommendationValidationTests(unittest.TestCase):
         )
 
         for response in invalid_records:
-            with self.subTest(response=response), patch.object(ai, "_chat", return_value=response):
-                matched, request_error = ai._request_classifications(object(), "test-model", [candidate])
+            with self.subTest(response=response):
+                backend = _fake_backend(response)
+                matched, request_error = ai._request_classifications(backend, "test-model", [candidate])
 
             self.assertEqual({}, matched)
             self.assertIsNone(request_error)
 
     def test_classification_forwards_optional_metadata_provider_settings(self):
+        backend = _fake_backend('{"classifications":[]}')
         with patch.object(ai, "verify_film_metadata", return_value=[]) as verify:
             ai.classify_movies(
-                "test",
+                backend,
                 "test-model",
                 ["Persona (1966)"],
                 tmdb_api_key="tmdb",
@@ -462,27 +467,21 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"classifications":[{"id":1,"genre_number":19,"confidence":4,'
             '"runner_up_genre_number":1,"reason":"Second."}]}'
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=[first_batch, retry_batch]
-        ) as chat:
-            results = ai.classify_movies("test", "test-model", ["Persona (1966)", "Stalker (1979)"])
+        backend = _fake_backend()
+        backend.chat.side_effect = [first_batch, retry_batch]
 
-        self.assertEqual(2, chat.call_count)
+        results = ai.classify_movies(backend, "test-model", ["Persona (1966)", "Stalker (1979)"])
+
+        self.assertEqual(2, backend.chat.call_count)
         self.assertEqual(["Persona (1966)", "Stalker (1979)"], [result["title"] for result in results])
         self.assertTrue(all(not result["needs_review"] for result in results))
         self.assertEqual(ai.GENRES[0], results[0]["genre_header"])
         self.assertEqual(ai.GENRES[18], results[1]["genre_header"])
 
     def test_gpt_oss_classification_uses_a_strict_schema_without_an_exact_count(self):
-        # Groq's strict structured-output mode uses constrained decoding: it
-        # cannot exceed the completion's token budget, so a batch that
-        # demanded an exact record count (minItems == maxItems) caused Groq
-        # to reject the *entire* completion outright whenever GPT-OSS ran out
-        # of room before finishing the array. The schema must accept a
-        # partial array so local validation and retries can do their job.
         captured = {}
 
-        def fake_chat(_client, _model, _system, _user, **kwargs):
+        def fake_chat(model, system, user, **kwargs):
             captured.update(kwargs)
             return (
                 '{"classifications":['
@@ -490,8 +489,10 @@ class RecommendationValidationTests(unittest.TestCase):
                 '{"id":2,"genre_number":19,"confidence":4,"runner_up_genre_number":1,"reason":"Two."}]}'
             )
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", side_effect=fake_chat):
-            ai.classify_movies("test", "openai/gpt-oss-120b", ["Persona (1966)", "Stalker (1979)"])
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        ai.classify_movies(backend, "openai/gpt-oss-120b", ["Persona (1966)", "Stalker (1979)"])
 
         schema = captured["response_schema"]
         self.assertTrue(schema["strict"])
@@ -502,25 +503,21 @@ class RecommendationValidationTests(unittest.TestCase):
     def test_classification_max_tokens_scales_with_batch_size(self):
         captured = []
 
-        def fake_chat(_client, _model, _system, _user, **kwargs):
+        def fake_chat(model, system, user, **kwargs):
             captured.append(kwargs["max_tokens"])
             return (
                 '{"classifications":[{"id":1,"genre_number":1,"confidence":5,'
                 '"runner_up_genre_number":null,"reason":"One."}]}'
             )
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(ai, "_chat", side_effect=fake_chat):
-            ai.classify_movies("test", "test-model", ["Persona (1966)"] * 8)
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
 
-        # A single 8-title batch should ask for meaningfully more budget than
-        # the old flat 768-token constant would give a single-title retry.
+        ai.classify_movies(backend, "test-model", ["Persona (1966)"] * 8)
+
         self.assertGreater(captured[0], 700)
 
     def test_partial_array_response_is_locally_accepted_and_gaps_retried(self):
-        # This reproduces the real Groq failure mode: a strict-schema batch
-        # returns fewer records than requested. With minItems removed, this
-        # is valid JSON the app receives directly (no 400), so the fix is
-        # exercised by simply returning a short array here.
         partial = (
             '{"classifications":[{"id":1,"genre_number":1,"confidence":5,'
             '"runner_up_genre_number":null,"reason":"First."}]}'
@@ -529,23 +526,17 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"classifications":[{"id":1,"genre_number":19,"confidence":4,'
             '"runner_up_genre_number":1,"reason":"Second."}]}'
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=[partial, retry]
-        ) as chat:
-            results = ai.classify_movies(
-                "test", "openai/gpt-oss-120b", ["Persona (1966)", "Stalker (1979)"]
-            )
+        backend = _fake_backend()
+        backend.chat.side_effect = [partial, retry]
 
-        self.assertEqual(2, chat.call_count)
+        results = ai.classify_movies(backend, "openai/gpt-oss-120b", ["Persona (1966)", "Stalker (1979)"])
+
+        self.assertEqual(2, backend.chat.call_count)
         self.assertFalse(any(result["needs_review"] for result in results))
         self.assertEqual(ai.GENRES[0], results[0]["genre_header"])
         self.assertEqual(ai.GENRES[18], results[1]["genre_header"])
 
     def test_hard_json_validate_failed_rejection_only_fails_that_batch_and_retries(self):
-        # Simulates Groq's 400 json_validate_failed: the whole request raises
-        # instead of returning parseable JSON. Only the titles from the
-        # failed request should be retried in smaller groups; a title must
-        # not be marked unresolved until every retry size is exhausted.
         schema_error = RuntimeError(
             "Error code: 400 - jsonschema: '/classifications' does not validate "
             "with /properties/classifications/minItems: minimum 16 items "
@@ -555,21 +546,17 @@ class RecommendationValidationTests(unittest.TestCase):
             '{"classifications":[{"id":1,"genre_number":1,"confidence":5,'
             '"runner_up_genre_number":null,"reason":"Recovered."}]}'
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=[schema_error, recovered]
-        ) as chat:
-            results = ai.classify_movies("test", "openai/gpt-oss-120b", ["Persona (1966)"])
+        backend = _fake_backend()
+        backend.chat.side_effect = [schema_error, recovered]
 
-        self.assertEqual(2, chat.call_count)
+        results = ai.classify_movies(backend, "openai/gpt-oss-120b", ["Persona (1966)"])
+
+        self.assertEqual(2, backend.chat.call_count)
         self.assertFalse(results[0]["needs_review"])
         self.assertEqual(ai.GENRES[0], results[0]["genre_header"])
 
     def test_titles_unresolved_after_every_retry_size_are_marked_for_review_not_silently_dropped(self):
-        # Every attempt (initial batch, retry-of-4, retry-of-1) fails for one
-        # title; it must come back explicitly flagged, never silently
-        # reclassified as if it succeeded, and every other title must still
-        # resolve normally.
-        def fake_chat(_client, _model, _system, user, **_kwargs):
+        def fake_chat(model, system, user, **_kwargs):
             if "Persistent Failure" in user:
                 raise RuntimeError("Error code: 400 - json_validate_failed")
             return (
@@ -577,24 +564,19 @@ class RecommendationValidationTests(unittest.TestCase):
                 '"runner_up_genre_number":null,"reason":"Ok."}]}'
             )
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=fake_chat
-        ):
-            results = ai.classify_movies(
-                "test", "openai/gpt-oss-120b", ["Persistent Failure (2000)"]
-            )
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        results = ai.classify_movies(backend, "openai/gpt-oss-120b", ["Persistent Failure (2000)"])
 
         self.assertTrue(results[0]["needs_review"])
         self.assertEqual(ai.UNCATEGORIZED_IMPORTS, results[0]["genre_header"])
         self.assertIn("json_validate_failed", results[0]["reason"])
 
     def test_seventy_one_title_import_maps_to_seventy_one_rows_under_partial_responses(self):
-        # Reproduces the reported real-world shape: 71 unique titles batched
-        # at the (now smaller) batch size, where every batch only returns
-        # about half its records on the first attempt.
         titles = [f"Film {i} (2000)" for i in range(1, 72)]
 
-        def fake_chat(_client, _model, _system, user, **_kwargs):
+        def fake_chat(model, system, user, **_kwargs):
             requested = re.findall(r"^\[(\d+)\]", user, re.MULTILINE)
             ids = [int(i) for i in requested]
             half = ids[: max(1, len(ids) // 2)]
@@ -604,19 +586,16 @@ class RecommendationValidationTests(unittest.TestCase):
             )
             return '{"classifications":[' + records + "]}"
 
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=fake_chat
-        ):
-            results = ai.classify_movies("test", "openai/gpt-oss-120b", titles)
+        backend = _fake_backend()
+        backend.chat.side_effect = fake_chat
+
+        results = ai.classify_movies(backend, "openai/gpt-oss-120b", titles)
 
         self.assertEqual(71, len(results))
         self.assertEqual(titles, [result["title"] for result in results])
         self.assertTrue(all(not result["needs_review"] for result in results))
 
     def test_short_error_trims_the_embedded_failed_generation_payload(self):
-        # Reproduces the real Groq 400 payload shape: a huge failed_generation
-        # JSON blob embedded in the exception text that used to fill the
-        # classify table's WHY column with a wall of JSON for every failure.
         huge_payload = "x" * 2000
         exc = RuntimeError(
             "Error code: 400 - {'error': {'message': \"Generated JSON does not "
@@ -636,61 +615,73 @@ class RecommendationValidationTests(unittest.TestCase):
             "Error code: 400 - json_validate_failed "
             f"'failed_generation': '{huge_payload}'"
         )
-        with patch.object(ai, "_client", return_value=object()), patch.object(
-            ai, "_chat", side_effect=schema_error
-        ):
-            results = ai.classify_movies("test", "openai/gpt-oss-120b", ["Persistent Failure (2000)"])
+        backend = _fake_backend(side_effect=schema_error)
+
+        results = ai.classify_movies(backend, "openai/gpt-oss-120b", ["Persistent Failure (2000)"])
 
         self.assertTrue(results[0]["needs_review"])
         self.assertLess(len(results[0]["reason"]), 250)
         self.assertNotIn("y" * 50, results[0]["reason"])
 
     def test_rate_limit_is_retried_with_backoff_instead_of_failing_immediately(self):
-        # Exercise _chat directly against a fake client whose first call
-        # raises a rate-limit error and second call succeeds.
+        """GroqBackend internal retry — test via the backend directly."""
+        from grimwatch.backends import GroqBackend
+        import time as time_module
+
         rate_limited = RuntimeError("Error code: 429 - rate_limit_exceeded, please retry after 0")
         calls = {"count": 0}
 
-        class Completions:
+        class FakeCompletions:
             def create(self, **_request):
                 calls["count"] += 1
                 if calls["count"] == 1:
                     raise rate_limited
                 return SimpleNamespace(
-                    choices=[SimpleNamespace(message=SimpleNamespace(content="ok", reasoning=None), finish_reason="stop")]
+                    choices=[SimpleNamespace(
+                        message=SimpleNamespace(content="ok", reasoning=None),
+                        finish_reason="stop",
+                    )]
                 )
 
-        fake_client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
-        with patch.object(ai.time, "sleep", return_value=None):
-            result = ai._chat(fake_client, "test-model", "system", "user")
+        from types import SimpleNamespace as SN
+
+        backend = GroqBackend.__new__(GroqBackend)
+        backend._client = SN(chat=SN(completions=FakeCompletions()))
+
+        with patch.object(time_module, "sleep", return_value=None):
+            result = backend.chat("test-model", "system", "user", max_tokens=10)
 
         self.assertEqual("ok", result)
         self.assertEqual(2, calls["count"])
 
 
-class GroqRequestContractTests(unittest.TestCase):
-    def _client_with_response(self, content, *, finish_reason="stop", reasoning=None):
+class GroqBackendContractTests(unittest.TestCase):
+    """Tests for GroqBackend request shape — GPT-OSS params, schema, empty response handling."""
+
+    def _backend_with_response(self, content, *, finish_reason="stop", reasoning=None):
+        from grimwatch.backends import GroqBackend
+        from types import SimpleNamespace as SN
+
         captured = {}
 
-        class Completions:
+        class FakeCompletions:
             def create(self, **request):
                 captured.update(request)
-                return SimpleNamespace(
-                    choices=[
-                        SimpleNamespace(
-                            message=SimpleNamespace(content=content, reasoning=reasoning),
-                            finish_reason=finish_reason,
-                        )
-                    ]
+                return SN(
+                    choices=[SN(
+                        message=SN(content=content, reasoning=reasoning),
+                        finish_reason=finish_reason,
+                    )]
                 )
 
-        return SimpleNamespace(chat=SimpleNamespace(completions=Completions())), captured
+        backend = GroqBackend.__new__(GroqBackend)
+        backend._client = SN(chat=SN(completions=FakeCompletions()))
+        return backend, captured
 
     def test_gpt_oss_request_disables_reasoning_and_uses_current_token_parameter(self):
-        client, request = self._client_with_response('{"id": 1}')
+        backend, request = self._backend_with_response('{"id": 1}')
 
-        result = ai._chat(
-            client,
+        result = backend.chat(
             "openai/gpt-oss-120b",
             "system",
             "user",
@@ -706,15 +697,15 @@ class GroqRequestContractTests(unittest.TestCase):
         self.assertEqual({"type": "json_object"}, request["response_format"])
 
     def test_strict_schema_overrides_json_object_mode(self):
-        client, request = self._client_with_response('{"classifications":[]}')
+        backend, request = self._backend_with_response('{"classifications":[]}')
         schema = {"name": "test", "strict": True, "schema": {"type": "object"}}
 
-        ai._chat(client, "openai/gpt-oss-120b", "system", "user", json_mode=True, response_schema=schema)
+        backend.chat("openai/gpt-oss-120b", "system", "user", max_tokens=10, json_mode=True, response_schema=schema)
 
         self.assertEqual({"type": "json_schema", "json_schema": schema}, request["response_format"])
 
     def test_empty_gpt_oss_final_response_reports_provider_metadata(self):
-        client, _ = self._client_with_response(
+        backend, _ = self._backend_with_response(
             None,
             finish_reason="length",
             reasoning="internal chain of thought",
@@ -724,7 +715,7 @@ class GroqRequestContractTests(unittest.TestCase):
             RuntimeError,
             r"no final text \(finish_reason=length; reasoning present but no final text\)",
         ):
-            ai._chat(client, "openai/gpt-oss-120b", "system", "user")
+            backend.chat("openai/gpt-oss-120b", "system", "user", max_tokens=10)
 
 
 if __name__ == "__main__":

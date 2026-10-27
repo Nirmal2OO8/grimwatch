@@ -4,6 +4,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 from unittest.mock import patch
 
@@ -213,7 +214,7 @@ class CliFlowTests(unittest.TestCase):
             classify_command.run_classify(str(source), write=True)
 
         classify_movies.assert_called_once_with(
-            "test",
+            unittest.mock.ANY,
             "test-model",
             ["Aguirre, the Wrath of God (1972)", "Aguirre, the Wrath of God (1972)"],
             tmdb_api_key=None,
@@ -303,7 +304,7 @@ class CliFlowTests(unittest.TestCase):
         self.assertIn("2/5", output)
         self.assertIn("low model confidence", output)
         classify_movies.assert_called_once_with(
-            "test",
+            unittest.mock.ANY,
             "test-model",
             ["Persona (1966)"],
             tmdb_api_key=None,

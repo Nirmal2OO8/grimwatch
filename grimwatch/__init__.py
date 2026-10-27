@@ -1,3 +1,3 @@
-"""Package metadata for grimwatch."""
+﻿"""Package metadata for grimwatch."""
+__version__ = "1.1.0"
 
-__version__ = "1.0.0"
