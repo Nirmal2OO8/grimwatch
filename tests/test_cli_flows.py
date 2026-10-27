@@ -4,14 +4,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 try:
     import rich  # noqa: F401
     import typer  # noqa: F401
     from grimwatch import cli
     from grimwatch.commands import add as add_command
+    from grimwatch.backends import AIBackend
     from grimwatch.commands import classify as classify_command
     from grimwatch.commands import dedup as dedup_command
     from grimwatch.commands import export as export_command
@@ -185,8 +187,8 @@ class CliFlowTests(unittest.TestCase):
         fake_result = [{"title": "Persona (1966)", "genre_header": "AUTEUR CINEMA", "reason": "Test", "needs_review": False}]
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
-            classify_command, "classify_movies", return_value=fake_result
-        ):
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(classify_command, "classify_movies", return_value=fake_result):
             classify_command.run_classify(str(source), write=True)
 
         self.assertEqual(archive_before, self.archive.read_text(encoding="utf-8"))
@@ -208,12 +210,14 @@ class CliFlowTests(unittest.TestCase):
         }
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(
             classify_command, "classify_movies", return_value=[fake_result, fake_result]
         ) as classify_movies:
             classify_command.run_classify(str(source), write=True)
 
         classify_movies.assert_called_once_with(
-            "test",
+            unittest.mock.ANY,
             "test-model",
             ["Aguirre, the Wrath of God (1972)", "Aguirre, the Wrath of God (1972)"],
             tmdb_api_key=None,
@@ -239,8 +243,8 @@ class CliFlowTests(unittest.TestCase):
         ]
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
-            classify_command, "classify_movies", return_value=fake_result
-        ):
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(classify_command, "classify_movies", return_value=fake_result):
             classify_command.run_classify(str(source), write=True)
 
         # Nothing should be written anywhere, and the main archive is untouched.
@@ -271,8 +275,8 @@ class CliFlowTests(unittest.TestCase):
         ]
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
-            classify_command, "classify_movies", return_value=recovered
-        ):
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(classify_command, "classify_movies", return_value=recovered):
             classify_command.run_classify(str(source), write=True)
 
         self.assertTrue((self.root / "list.classified.md").exists())
@@ -293,6 +297,8 @@ class CliFlowTests(unittest.TestCase):
         ]
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(
             classify_command, "classify_movies", return_value=result
         ) as classify_movies, classify_command.console.capture() as capture:
             classify_command.run_classify(str(source), refresh_metadata=True)
@@ -303,7 +309,7 @@ class CliFlowTests(unittest.TestCase):
         self.assertIn("2/5", output)
         self.assertIn("low model confidence", output)
         classify_movies.assert_called_once_with(
-            "test",
+            unittest.mock.ANY,
             "test-model",
             ["Persona (1966)"],
             tmdb_api_key=None,
@@ -325,8 +331,8 @@ class CliFlowTests(unittest.TestCase):
         ]
 
         with patch.object(classify_command, "get_config", return_value=config), patch.object(
-            classify_command, "classify_movies", return_value=fake_result
-        ):
+            classify_command, "get_backend", return_value=MagicMock(spec=AIBackend)
+        ), patch.object(classify_command, "classify_movies", return_value=fake_result):
             classify_command.run_classify(str(source), write=True, force=True)
 
         output = self.root / "list.classified.md"
